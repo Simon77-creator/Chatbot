@@ -2,36 +2,26 @@ import streamlit as st
 import fitz
 import pdfplumber
 import io
-import openai
 import tiktoken
 import json
+from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from typing import List, Dict
 
-# ======= STREAMLIT CONFIG =======
-st.set_page_config(page_title="📚 Studienbot", layout="wide")
-st.title("📚 Studienbot mit GPT + Qdrant + Azure")
-
 # ======= SECRETS =======
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-QDRANT_API_KEY = st.secrets["QDRANT_API_KEY"]
-QDRANT_URL = st.secrets["QDRANT_URL"]
-AZURE_BLOB_CONN_STR = st.secrets["AZURE_BLOB_CONN_STR"]
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+qdrant = QdrantClient(url=st.secrets["QDRANT_URL"], api_key=st.secrets["QDRANT_API_KEY"])
+blob_service = BlobServiceClient.from_connection_string(st.secrets["AZURE_BLOB_CONN_STR"])
 AZURE_CONTAINER = st.secrets["AZURE_CONTAINER"]
-
-openai.api_key = OPENAI_API_KEY
-qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-blob_service = BlobServiceClient.from_connection_string(AZURE_BLOB_CONN_STR)
-
 COLLECTION_NAME = "studienbot"
 MEMORY_PREFIX = "memory"
 
-if COLLECTION_NAME not in [c.name for c in qdrant.get_collections().collections]:
-    qdrant.recreate_collection(COLLECTION_NAME, vectors_config=VectorParams(size=1536, distance=Distance.COSINE))
+# ======= STREAMLIT UI =======
+st.set_page_config(page_title="📚 Studienbot", layout="wide")
+st.title("📚 Studienbot mit GPT + Qdrant + Azure")
 
-# ======= UI: User und Session =======
 with st.sidebar:
     st.header("🧠 Sitzungs-Memory")
     user = st.text_input("👤 Dein Name", value="gast")
@@ -40,6 +30,10 @@ with st.sidebar:
         process_pdfs_from_blob()
 
 memory_blob_path = f"{MEMORY_PREFIX}/{user}/{session}.json"
+
+# ======= INITIALISIERE COLLECTION =======
+if COLLECTION_NAME not in [c.name for c in qdrant.get_collections().collections]:
+    qdrant.recreate_collection(COLLECTION_NAME, vectors_config=VectorParams(size=1536, distance=Distance.COSINE))
 
 # ======= SPEICHERN & LADEN =======
 def load_memory() -> List[Dict]:
@@ -101,14 +95,11 @@ def process_pdfs_from_blob():
             st.write(f"📥 Verarbeite: {blob.name}")
             blob_data = container_client.get_blob_client(blob).download_blob().readall()
             chunks = extract_chunks_from_pdf(blob_data)
-            vectors = []
-            for chunk in chunks:
-                emb = openai.Embedding.create(input=chunk["content"], model="text-embedding-ada-002")
-                vectors.append(emb.data[0].embedding)
-            points = [
-                PointStruct(id=i, vector=vectors[i], payload={"text": chunks[i]["content"], **chunks[i]["metadata"]})
-                for i in range(len(chunks))
-            ]
+            points = []
+            for i, chunk in enumerate(chunks):
+                response = client.embeddings.create(input=chunk["content"], model="text-embedding-ada-002")
+                embedding = response.data[0].embedding
+                points.append(PointStruct(id=i, vector=embedding, payload={"text": chunk["content"], **chunk["metadata"]}))
             qdrant.upsert(collection_name=COLLECTION_NAME, points=points)
     st.success("✅ Alle PDFs verarbeitet und in Qdrant gespeichert.")
 
@@ -116,8 +107,10 @@ def process_pdfs_from_blob():
 def run_query(frage):
     history = load_memory()
 
-    emb = openai.Embedding.create(input=frage, model="text-embedding-ada-002")
-    results = qdrant.search(collection_name=COLLECTION_NAME, query_vector=emb.data[0].embedding, limit=15)
+    response = client.embeddings.create(input=frage, model="text-embedding-ada-002")
+    query_vector = response.data[0].embedding
+
+    results = qdrant.search(collection_name=COLLECTION_NAME, query_vector=query_vector, limit=15)
     kontext = [f"[{r.payload['source']} – Seite {r.payload['page']}]:\n{r.payload['text']}" for r in results]
     context_text = "\n\n".join(kontext)
 
@@ -126,14 +119,14 @@ def run_query(frage):
         {"role": "user", "content": f"Kontext:\n{context_text}\n\nFrage: {frage}"}
     ]
 
-    response = openai.ChatCompletion.create(
+    completion = client.chat.completions.create(
         model="gpt-4",
         messages=messages,
         temperature=0.4,
         max_tokens=1200
     )
 
-    reply = response.choices[0].message.content
+    reply = completion.choices[0].message.content
     st.subheader("💬 Antwort")
     st.write(reply)
 
