@@ -1,0 +1,7 @@
+streamlit
+openai
+pdfplumber
+pymupdf
+tiktoken
+qdrant-client
+azure-storage-blob
