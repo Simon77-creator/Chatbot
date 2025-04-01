@@ -20,7 +20,7 @@ MEMORY_PREFIX = "memory"
 
 # ======= STREAMLIT UI =======
 st.set_page_config(page_title="📚 Studienbot", layout="wide")
-st.title("📚 Studienbot mit GPT + Qdrant + Azure")
+st.title("📚 FHDW-Studienbot")
 
 with st.sidebar:
     st.header("🧠 Sitzungs-Memory")
