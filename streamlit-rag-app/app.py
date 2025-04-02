@@ -178,7 +178,6 @@ def build_gpt_prompt(context_chunks: List[Dict], frage: str) -> List[Dict]:
     f"{context}"
 )
 
-    )
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": frage}
