@@ -1,7 +1,8 @@
 streamlit
-openai>=1.0.0
-qdrant-client
-tiktoken
 PyMuPDF
 pdfplumber
+tiktoken
+openai
+qdrant-client
 azure-storage-blob
+openai>=1.0.0
