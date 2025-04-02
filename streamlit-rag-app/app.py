@@ -127,44 +127,57 @@ def delete_memory(user: str, session: str):
     blob.delete_blob()
 
 # Kontextaufbereitung
-def prepare_context_chunks(resultate, max_tokens=6500, max_chunk_length=2000, max_per_source=4):
+def prepare_context_chunks(resultate, max_tokens=6500, max_chunk_length=2000, max_per_source=6):
     enc = tiktoken.encoding_for_model("gpt-4")
     total_tokens = 0
     context_chunks = []
     seen = set()
     source_counter = defaultdict(int)
 
+    # Optional: zuerst nur relevante Scores (z. B. unter 0.82)
+    resultate = [r for r in resultate if r["score"] <= 0.82]
+
+    # Nach Score sortieren (beste zuerst)
     resultate = sorted(resultate, key=lambda x: x["score"])
 
     for r in resultate:
         if source_counter[r["source"]] >= max_per_source:
             continue
+
         text = r["text"][:max_chunk_length].strip()
         tokens = len(enc.encode(text))
+
         if total_tokens + tokens > max_tokens:
             break
+
         if text.lower() in seen:
             continue
+
         seen.add(text.lower())
         context_chunks.append({
             "text": text,
             "source": r["source"],
             "page": r["page"]
         })
+
         source_counter[r["source"]] += 1
         total_tokens += tokens
 
     return context_chunks
 
+
 # Prompt-Aufbau
 def build_gpt_prompt(context_chunks: List[Dict], frage: str) -> List[Dict]:
     context = "\n\n".join([f"{doc['source']} – Seite {doc['page']}:\n{doc['text']}" for doc in context_chunks])
     system_prompt = (
-        "Du bist ein präziser Studienberater der FHDW.\n"
-        "Antworte sachlich, vollständig und strukturiert auf Grundlage des folgenden Kontexts.\n"
-        "Nutze Absätze, Aufzählungen und Zwischenüberschriften, wenn sinnvoll.\n"
-        "Wenn der Kontext keine Antwort erlaubt, sage dies ehrlich.\n\n"
-        f"{context}"
+    "Du bist ein präziser Studienberater der FHDW.\n"
+    "Antworte sachlich, vollständig und strukturiert auf Grundlage des folgenden Kontexts.\n"
+    "Beziehe dich klar auf die gefundenen Informationen – zitiere ggf. Seitenangaben.\n"
+    "Wenn der Kontext keine Antwort erlaubt, weise freundlich darauf hin.\n"
+    "Vermeide allgemeine Aussagen, wenn sie nicht im Kontext vorkommen.\n\n"
+    f"{context}"
+)
+
     )
     return [
         {"role": "system", "content": system_prompt},
