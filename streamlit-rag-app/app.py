@@ -14,6 +14,10 @@ from openai import OpenAI
 
 import streamlit as st
 
+if "OPENAI_API_KEY" not in st.secrets or not st.secrets["OPENAI_API_KEY"]:
+    st.warning("⚠️ Diese App ist nur auf Streamlit Cloud voll funktionsfähig.")
+    st.stop()
+
 # Fallback für lokale Entwicklung
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 QDRANT_API_KEY = st.secrets.get("QDRANT_API_KEY", "")
