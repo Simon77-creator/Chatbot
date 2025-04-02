@@ -1,6 +1,6 @@
 import os
 import io
-/import fitz
+import fitz
 import pdfplumber
 import tiktoken
 import json
