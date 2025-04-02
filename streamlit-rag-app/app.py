@@ -165,7 +165,7 @@ def build_gpt_prompt(context_chunks: List[Dict], frage: str) -> List[Dict]:
     ]
 
 # Hauptabfrage
-def run_query(frage, user, session, memory_on=True):
+def run_query(frage, user, session, memory_on=True, debug=False):
     db = VectorDB()
     memory = load_memory(user, session) if memory_on else []
     resultate = db.query(frage)
@@ -176,6 +176,14 @@ def run_query(frage, user, session, memory_on=True):
     if memory_on:
         memory.extend([{"role": "user", "content": frage}, {"role": "assistant", "content": reply}])
         save_memory(user, session, memory)
+    if debug:
+        st.subheader("🧪 DEBUG INFO")
+        st.write("Suchergebnisse aus Vektor-DB:")
+        st.write(resultate)
+        st.write("Generierter Kontext für Prompt:")
+        st.write(chunks)
+        st.write("Nachricht an GPT:")
+        st.write(messages)
     return reply
 
 # Streamlit UI
@@ -195,7 +203,7 @@ use_memory = st.sidebar.checkbox("Memory verwenden", value=True)
 frage = st.text_input("Stelle deine Frage:")
 
 if st.button("Absenden") and frage:
-    antwort = run_query(frage, user, session, use_memory)
+    antwort = run_query(frage, user, session, use_memory, debug=True)
     st.markdown(f"**Antwort:**\n\n{antwort}")
     if use_memory:
         st.markdown("## Chatverlauf")
