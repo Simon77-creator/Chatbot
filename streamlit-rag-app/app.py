@@ -37,7 +37,7 @@ if COLLECTION_NAME not in [c.name for c in qdrant.get_collections().collections]
 
 # === 📄 PDF-Verarbeitung ===
 class PDFProcessor:
-    def extract_text_chunks(self, pdf_bytes: bytes, max_tokens=800, overlap_tokens=60) -> List[Dict]:
+    def extract_text_chunks(self, pdf_bytes: bytes, max_tokens=2000, overlap_tokens=50) -> List[Dict]:
         enc = tiktoken.encoding_for_model("text-embedding-ada-002")
         chunks = []
 
