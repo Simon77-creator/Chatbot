@@ -12,12 +12,19 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from openai import OpenAI
 
-# Konfiguration über Secrets
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-QDRANT_API_KEY = st.secrets["QDRANT_API_KEY"]
-QDRANT_URL = st.secrets["QDRANT_URL"]
-AZURE_BLOB_CONN_STR = st.secrets["AZURE_BLOB_CONN_STR"]
-AZURE_CONTAINER = st.secrets["AZURE_CONTAINER"]
+import streamlit as st
+
+# Fallback für lokale Entwicklung
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
+QDRANT_API_KEY = st.secrets.get("QDRANT_API_KEY", "")
+QDRANT_URL = st.secrets.get("QDRANT_URL", "")
+AZURE_BLOB_CONN_STR = st.secrets.get("AZURE_BLOB_CONN_STR", "")
+AZURE_CONTAINER = st.secrets.get("AZURE_CONTAINER", "")
+
+# Optional: Warnung bei leerem Key (nur lokal sichtbar)
+if not OPENAI_API_KEY:
+    st.warning("⚠️ OPENAI_API_KEY nicht gefunden – läuft nur in Streamlit Cloud?")
+
 
 # Initialisierung
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
