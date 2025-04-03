@@ -1,130 +1,111 @@
-# ✅ Streamlit RAG App für die FHDW – mit Relevanzsortierung & Chunk-Zusammenfassung
-
-import os
-import io
-import fitz
-import pdfplumber
-import tiktoken
-import json
 import streamlit as st
+import os, fitz, openai, pdfplumber
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import PointStruct
+from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
 from typing import List, Dict
 from collections import defaultdict
-from azure.storage.blob import BlobServiceClient, ContentSettings
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
-from openai import OpenAI
+import tiktoken
 
-# === 🔐 Secrets einlesen ===
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
-QDRANT_API_KEY = st.secrets.get("QDRANT_API_KEY", "")
-QDRANT_URL = st.secrets.get("QDRANT_URL", "")
-AZURE_BLOB_CONN_STR = st.secrets.get("AZURE_BLOB_CONN_STR", "")
-AZURE_CONTAINER = st.secrets.get("AZURE_CONTAINER", "")
+# Set secrets
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+AZURE_BLOB_CONN_STR = st.secrets["AZURE_BLOB_CONN_STR"]
+AZURE_CONTAINER = st.secrets["AZURE_CONTAINER"]
+QDRANT_HOST = st.secrets["QDRANT_HOST"]
 
-if not OPENAI_API_KEY:
-    st.warning("⚠️ OPENAI_API_KEY nicht gefunden – läuft nur auf Streamlit Cloud?")
-    st.stop()
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-# === ⚙️ Initialisierung ===
-client = OpenAI(api_key=OPENAI_API_KEY)
-qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-blob_service = BlobServiceClient.from_connection_string(AZURE_BLOB_CONN_STR)
-COLLECTION_NAME = "studienbot"
-MEMORY_PREFIX = "memory"
-
-if COLLECTION_NAME not in [c.name for c in qdrant.get_collections().collections]:
-    qdrant.create_collection(COLLECTION_NAME, vectors_config=VectorParams(size=1536, distance=Distance.COSINE))
-
-# === 📄 PDF-Verarbeitung ===
+# PDF Processor
 class PDFProcessor:
-    def extract_text_chunks(self, pdf_bytes: bytes, max_tokens=2000, overlap_tokens=50) -> List[Dict]:
-        enc = tiktoken.encoding_for_model("text-embedding-ada-002")
+    def extract_text_chunks(self, pdf_path: str, max_tokens=2000, overlap_tokens=50) -> List[Dict]:
         chunks = []
+        enc = tiktoken.encoding_for_model("gpt-4")
 
-        def chunk_text(text):
+        def paragraph_chunks(text: str) -> List[str]:
             paragraphs = text.split("\n\n")
-            token_buffer, current_tokens, result = [], 0, []
+            token_buffer = []
+            current_tokens = 0
+            result = []
+
             for para in paragraphs:
-                tokens = enc.encode(para)
-                if current_tokens + len(tokens) > max_tokens:
+                para_tokens = enc.encode(para)
+                if current_tokens + len(para_tokens) > max_tokens:
                     result.append(enc.decode(token_buffer))
-                    token_buffer = token_buffer[-overlap_tokens:] + tokens
+                    token_buffer = token_buffer[-overlap_tokens:] + para_tokens
                     current_tokens = len(token_buffer)
                 else:
-                    token_buffer += tokens
-                    current_tokens += len(tokens)
+                    token_buffer += para_tokens
+                    current_tokens += len(para_tokens)
+
             if token_buffer:
                 result.append(enc.decode(token_buffer))
             return result
 
-        with fitz.open(stream=io.BytesIO(pdf_bytes), filetype="pdf") as doc:
-            for i, page in enumerate(doc):
-                text = page.get_text()
-                meta = {"source": "blob", "page": i + 1}
-                for chunk in chunk_text(text):
-                    chunks.append({"content": chunk, "metadata": meta})
+        try:
+            with fitz.open(pdf_path) as doc:
+                for page_num, page in enumerate(doc):
+                    text = page.get_text()
+                    metadata = {"source": os.path.basename(pdf_path), "page": page_num + 1}
+                    for chunk in paragraph_chunks(text):
+                        chunks.append({"content": chunk, "metadata": metadata})
+        except Exception as e:
+            st.error(f"Fehler bei Text in {pdf_path}: {e}")
 
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as doc:
-            for i, page in enumerate(doc.pages):
-                tables = page.extract_tables()
-                for table in tables:
-                    table_text = "\n".join([" | ".join([str(cell) if cell else "" for cell in row]) for row in table if row])
-                    meta = {"source": "blob", "page": i + 1}
-                    for chunk in chunk_text(table_text):
-                        chunks.append({"content": chunk, "metadata": meta})
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for i, page in enumerate(pdf.pages):
+                    tables = page.extract_tables()
+                    for table in tables:
+                        table_text = "\n".join([
+                            " | ".join([str(cell) if cell is not None else "" for cell in row])
+                            for row in table if row
+                        ])
+                        metadata = {"source": os.path.basename(pdf_path), "page": i + 1}
+                        for chunk in paragraph_chunks(table_text):
+                            chunks.append({"content": chunk, "metadata": metadata})
+        except Exception as e:
+            st.error(f"Fehler bei Tabellen in {pdf_path}: {e}")
 
         return chunks
 
-# === 🔍 Vektor-Datenbank ===
+# Qdrant Vector Database
 class VectorDB:
-    def __init__(self):
-        self.client = qdrant
-        self.collection = COLLECTION_NAME
+    def __init__(self, api_key: str, host: str, port=6333):
+        self.client = QdrantClient(api_key=api_key, host=host, port=port)
+        self.collection_name = "studienbot"
+        self.client.recreate_collection(
+            collection_name=self.collection_name,
+            vectors_config={
+                "size": 1536,
+                "distance": "Cosine"
+            }
+        )
 
     def add(self, documents: List[Dict]):
-        points = []
-        for i, doc in enumerate(documents):
-            emb = client.embeddings.create(input=doc["content"], model="text-embedding-ada-002")
-            vec = emb.data[0].embedding
-            points.append(PointStruct(id=i, vector=vec, payload={"text": doc["content"], **doc["metadata"]}))
-        self.client.upsert(collection_name=self.collection, points=points)
+        points = [
+            PointStruct(id=f"doc_{i}", vector=self.client.get_embeddings(doc["content"]), payload=doc["metadata"])
+            for i, doc in enumerate(documents)
+        ]
+        self.client.upsert(collection_name=self.collection_name, points=points)
 
     def query(self, question: str, n=30) -> List[Dict]:
-        emb = client.embeddings.create(input=question, model="text-embedding-ada-002")
-        query_vector = emb.data[0].embedding
-        results = self.client.search(collection_name=self.collection, query_vector=query_vector, limit=n)
-        return [{
-            "text": r.payload["text"],
-            "source": r.payload["source"],
-            "page": r.payload["page"],
-            "score": r.score
-        } for r in results]
+        embeddings = self.client.get_embeddings(question)
+        search_result = self.client.search(
+            collection_name=self.collection_name,
+            query_vector=embeddings,
+            limit=n
+        )
+        hits = []
+        for result in search_result:
+            hits.append({
+                "text": result.payload["content"],
+                "source": result.payload["source"],
+                "page": result.payload["page"],
+                "score": result.score
+            })
+        return hits
 
-# === 💾 Memory ===
-def list_sessions(user: str) -> List[str]:
-    prefix = f"{MEMORY_PREFIX}/{user}/"
-    container = blob_service.get_container_client(AZURE_CONTAINER)
-    return [b.name.replace(prefix, "").replace(".json", "") for b in container.list_blobs(name_starts_with=prefix)]
-
-def load_memory(user: str, session: str) -> List[Dict]:
-    try:
-        path = f"{MEMORY_PREFIX}/{user}/{session}.json"
-        blob = blob_service.get_blob_client(container=AZURE_CONTAINER, blob=path)
-        return json.loads(blob.download_blob().readall().decode("utf-8"))
-    except:
-        return []
-
-def save_memory(user: str, session: str, history: List[Dict]):
-    path = f"{MEMORY_PREFIX}/{user}/{session}.json"
-    blob = blob_service.get_blob_client(container=AZURE_CONTAINER, blob=path)
-    blob.upload_blob(json.dumps(history), overwrite=True, content_settings=ContentSettings(content_type="application/json"))
-
-def delete_memory(user: str, session: str):
-    path = f"{MEMORY_PREFIX}/{user}/{session}.json"
-    blob = blob_service.get_blob_client(container=AZURE_CONTAINER, blob=path)
-    blob.delete_blob()
-
-# === 🧠 Kontextaufbereitung mit Zusammenfassung ===
+# Relevance Sorting and Summarization
 def prepare_context_chunks(resultate: List[Dict], max_tokens=6500, max_chunk_length=2000, max_per_source=4, allow_duplicates: bool = False):
     seen_texts = set()
     if resultate and "score" in resultate[0]:
@@ -177,9 +158,12 @@ def prepare_context_chunks(resultate: List[Dict], max_tokens=6500, max_chunk_len
 
     return context_chunks
 
-# === 💬 Prompt-Aufbau ===
+# Prompt Construction
 def build_gpt_prompt(context_chunks: List[Dict], frage: str) -> List[Dict]:
-    context = "\n\n".join([f"### {doc['source']} – Seite {doc['page']}\n{doc['text']}" for doc in context_chunks])
+    context = "\n\n".join([
+        f"### {doc['source']} – Seite {doc['page']}\n{doc['text']}" for doc in context_chunks
+    ])
+
     system_prompt = (
         "Du bist ein freundlicher und präziser Studienberater der FHDW.\n"
         "Nutze ausschließlich den folgenden Kontext, um die Nutzerfrage zu beantworten.\n"
@@ -190,54 +174,60 @@ def build_gpt_prompt(context_chunks: List[Dict], frage: str) -> List[Dict]:
         "Verwende Emojis nur, wenn es zur besseren Lesbarkeit beiträgt.\n\n"
         f"### Kontext ###\n{context}\n\n### Aufgabe ###\nFrage: {frage}"
     )
+
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": frage}
     ]
 
-# === 🚀 Hauptabfrage ===
-def run_query(frage, user, session, memory_on=True, debug=False):
-    db = VectorDB()
-    memory = load_memory(user, session) if memory_on else []
-    resultate = db.query(frage)
-    chunks = prepare_context_chunks(resultate)
-    messages = memory + build_gpt_prompt(chunks, frage)
-    response = client.chat.completions.create(model="gpt-4", messages=messages, max_tokens=1500, temperature=0.4)
-    reply = response.choices[0].message.content
+# Streamlit UI
+st.title("Studienberater der FHDW")
 
-    if memory_on:
-        memory.extend([{"role": "user", "content": frage}, {"role": "assistant", "content": reply}])
-        save_memory(user, session, memory)
+blob_service_client = BlobServiceClient.from_connection_string(AZURE_BLOB_CONN_STR)
+container_client = blob_service_client.get_container_client(AZURE_CONTAINER)
 
-    if debug:
-        st.subheader("🧪 DEBUG INFO")
-        st.write("Suchergebnisse aus Vektor-DB:", resultate)
-        st.write("Generierter Kontext:", chunks)
-        st.write("Prompt an GPT:", messages)
+blobs = container_client.list_blobs()
+pdf_files = [blob.name for blob in blobs if blob.name.endswith('.pdf')]
 
-    return reply
+if pdf_files:
+    processor = PDFProcessor()
+    db = VectorDB(OPENAI_API_KEY, QDRANT_HOST)
 
-# === 🎨 Streamlit UI ===
-st.title("🎓 Studienbot")
-st.sidebar.header("Einstellungen")
+    all_chunks = []
+    for pdf_file in pdf_files:
+        blob_client = container_client.get_blob_client(pdf_file)
+        pdf_path = os.path.join("/tmp", pdf_file)
+        with open(pdf_path, "wb") as f:
+            f.write(blob_client.download_blob().readall())
+        chunks = processor.extract_text_chunks(pdf_path)
+        all_chunks.extend(chunks)
+        os.remove(pdf_path)  # Entferne temporäre PDF-Datei
 
-user = st.sidebar.text_input("Benutzername", value="demo")
-sessions = list_sessions(user)
-selected_session = st.sidebar.selectbox("Sitzung wählen oder neu", ["Neue Sitzung"] + sessions)
-session = st.sidebar.text_input("Sitzung", value="default" if selected_session == "Neue Sitzung" else selected_session)
+    st.write(f"Speichere {len(all_chunks)} Chunks in der Datenbank...")
+    db.add(all_chunks)
+    st.write("Verarbeitung abgeschlossen.")
 
-if st.sidebar.button("Verlauf löschen"):
-    delete_memory(user, session)
-    st.success("Verlauf gelöscht.")
+frage = st.text_input("Stelle eine Frage:")
 
-use_memory = st.sidebar.checkbox("Memory verwenden", value=True)
-frage = st.text_input("Stelle deine Frage:")
+if frage:
+    db = VectorDB(OPENAI_API_KEY, QDRANT_HOST)
+    resultate = db.query(frage, n=30)
+    kontext = prepare_context_chunks(resultate)
 
-if st.button("Absenden") and frage:
-    antwort = run_query(frage, user, session, use_memory, debug=True)
-    st.markdown(f"**Antwort:**\n\n{antwort}")
-    if use_memory:
-        st.markdown("## Chatverlauf")
-        for entry in load_memory(user, session):
-            role = "👤 Du" if entry["role"] == "user" else "🤖 Studienbot"
-            st.markdown(f"**{role}:** {entry['content']}")
+    if not kontext:
+        st.write("Ich konnte zu deiner Frage in den hinterlegten Dokumenten leider keine passenden Informationen finden.")
+    else:
+        st.write("Kontext, den GPT erhalten hat:")
+        for chunk in kontext:
+            st.write(f"🔹 {chunk['source']} – Seite {chunk['page']}\n{chunk['text']}\n{'-'*60}")
+
+        messages = build_gpt_prompt(kontext, frage)
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            temperature=0.3,
+            max_tokens=1500
+        )
+
+        antwort = response.choices[0].message.content
+        st.markdown(antwort)
