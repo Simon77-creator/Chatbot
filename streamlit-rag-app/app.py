@@ -8,10 +8,14 @@ from collections import defaultdict
 import tiktoken
 
 # Set secrets
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-AZURE_BLOB_CONN_STR = st.secrets["AZURE_BLOB_CONN_STR"]
-AZURE_CONTAINER = st.secrets["AZURE_CONTAINER"]
-QDRANT_HOST = st.secrets["QDRANT_HOST"]
+try:
+    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+    AZURE_BLOB_CONN_STR = st.secrets["AZURE_BLOB_CONN_STR"]
+    AZURE_CONTAINER = st.secrets["AZURE_CONTAINER"]
+    QDRANT_HOST = st.secrets["QDRANT_HOST"]
+except KeyError as e:
+    st.error(f"Fehlender Schlüssel in den Geheimnissen: {e}")
+    st.stop()
 
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
@@ -71,15 +75,19 @@ class PDFProcessor:
 # Qdrant Vector Database
 class VectorDB:
     def __init__(self, api_key: str, host: str, port=6333):
-        self.client = QdrantClient(api_key=api_key, host=host, port=port)
-        self.collection_name = "studienbot"
-        self.client.recreate_collection(
-            collection_name=self.collection_name,
-            vectors_config={
-                "size": 1536,
-                "distance": "Cosine"
-            }
-        )
+        try:
+            self.client = QdrantClient(api_key=api_key, host=host, port=port)
+            self.collection_name = "studienbot"
+            self.client.recreate_collection(
+                collection_name=self.collection_name,
+                vectors_config={
+                    "size": 1536,
+                    "distance": "Cosine"
+                }
+            )
+        except ValueError as e:
+            st.error(f"Fehler bei der Verbindung zu Qdrant: {e}")
+            st.stop()
 
     def add(self, documents: List[Dict]):
         points = [
